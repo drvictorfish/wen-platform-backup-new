@@ -4,6 +4,13 @@ import { useEffect, useState } from 'react'
 import { Loader2, MapPin, Search } from 'lucide-react'
 import { WEN_HQ } from '@/lib/delivery'
 
+export interface BiasBox {
+  minLat: number
+  maxLat: number
+  minLng: number
+  maxLng: number
+}
+
 export interface AddressSuggestion {
   label: string
   lat: number
@@ -39,6 +46,10 @@ interface Props {
   invalid?: boolean
   onChange: (value: string) => void
   onSelect: (suggestion: AddressSuggestion) => void
+  /** Bias box covering every active city's service area (see
+   * combinedServiceAreaBox in lib/cities.ts). Falls back to a Makurdi-only
+   * box when not provided, so this stays backward-compatible. */
+  biasBox?: BiasBox | null
 }
 
 function uniqueParts(parts: Array<string | undefined>) {
@@ -87,7 +98,7 @@ function toSuggestion(feature: LocationIQFeature): AddressSuggestion | null {
   return null
 }
 
-export function AddressAutocomplete({ id, value, invalid, onChange, onSelect }: Props) {
+export function AddressAutocomplete({ id, value, invalid, onChange, onSelect, biasBox }: Props) {
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([])
   const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [isOpen, setIsOpen] = useState(false)
@@ -112,10 +123,14 @@ export function AddressAutocomplete({ id, value, invalid, onChange, onSelect }: 
         const token = process.env.NEXT_PUBLIC_LOCATIONIQ_TOKEN
         if (!token) throw new Error('NEXT_PUBLIC_LOCATIONIQ_TOKEN is not set')
 
-        // Soft-bias results toward Makurdi (WEN_HQ) without excluding the
-        // rest of the country — bounded=0 keeps the viewbox as a preference,
-        // not a hard filter.
-        const box = 0.6 // degrees ~ generous radius around HQ
+        // Soft-bias results toward our active cities (or Makurdi alone, if
+        // no biasBox was passed in) without excluding the rest of the
+        // country — bounded=0 keeps the viewbox as a preference, not a
+        // hard filter.
+        const box = 0.6 // degrees ~ generous radius around a single HQ
+        const viewbox = biasBox
+          ? [biasBox.minLng, biasBox.maxLat, biasBox.maxLng, biasBox.minLat]
+          : [WEN_HQ.lng - box, WEN_HQ.lat + box, WEN_HQ.lng + box, WEN_HQ.lat - box]
         const url = new URL('https://us1.locationiq.com/v1/autocomplete')
         url.searchParams.set('key', token)
         url.searchParams.set('q', query)
@@ -124,10 +139,7 @@ export function AddressAutocomplete({ id, value, invalid, onChange, onSelect }: 
         url.searchParams.set('format', 'json')
         url.searchParams.set('normalizecity', '1')
         url.searchParams.set('dedupe', '1')
-        url.searchParams.set('viewbox', [
-          WEN_HQ.lng - box, WEN_HQ.lat + box,
-          WEN_HQ.lng + box, WEN_HQ.lat - box,
-        ].join(','))
+        url.searchParams.set('viewbox', viewbox.join(','))
         url.searchParams.set('bounded', '0')
 
         const response = await fetch(url, { signal: controller.signal })
@@ -159,7 +171,7 @@ export function AddressAutocomplete({ id, value, invalid, onChange, onSelect }: 
       window.clearTimeout(timeout)
       controller.abort()
     }
-  }, [query, selectedValue])
+  }, [query, selectedValue, biasBox])
 
   function selectSuggestion(suggestion: AddressSuggestion) {
     setSelectedValue(suggestion.label)

@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
 import { getMarketDayInfo } from '@/lib/market-day'
-import { haversineKm, calcDeliveryFee, isWithinServiceArea, SERVICE_AREA_LABEL, WEN_HQ } from '@/lib/delivery'
+import { haversineKm, calcDeliveryFee } from '@/lib/delivery'
+import { resolveCityByPoint, mapCityRow } from '@/lib/cities'
 import { sendEmail } from '@/lib/email'
 import { orderReceiptEmail } from '@/lib/email-templates'
 import { sendTelegramAlert, newOrderAlertText } from '@/lib/telegram'
@@ -77,17 +78,29 @@ export async function POST(req: NextRequest) {
     if (items.some(i => !Number.isInteger(i.quantity) || i.quantity < 1 || i.quantity > 100)) {
       return NextResponse.json({ error: 'Please check the quantities in your cart and try again.' }, { status: 400 })
     }
-    // WEN currently only delivers within Makurdi, Benue State — never trust
-    // the client's own geofence check, re-verify here before creating
-    // anything. See isWithinServiceArea() in lib/delivery.ts.
-    if (!isWithinServiceArea(deliveryLat, deliveryLng)) {
+    const supabase = createAdminClient()
+
+    // Which (if any) of WEN's cities this delivery point actually falls
+    // in — never trust a client-sent city/multiplier, this is the
+    // authoritative source for both the service-area gate and which
+    // price_multiplier applies to this order. See lib/cities.ts.
+    const { data: cityRows, error: citiesError } = await supabase
+      .from('cities')
+      .select('slug, name, state, hq_lat, hq_lng, service_radius_km, price_multiplier')
+      .eq('is_active', true)
+    if (citiesError) {
+      console.error('[orders] cities load failed:', citiesError.message)
+      return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 })
+    }
+    const cities = (cityRows ?? []).map(mapCityRow)
+    const city = resolveCityByPoint(cities, deliveryLat, deliveryLng)
+    if (!city) {
+      const cityNames = cities.map(c => `${c.name}, ${c.state}`).join(' or ')
       return NextResponse.json(
-        { error: `Delivery isn't available there yet — we currently deliver within ${SERVICE_AREA_LABEL}, and we'll be expanding soon.` },
+        { error: `Delivery isn't available there yet — we currently deliver within ${cityNames || 'select cities'}, and we'll be expanding soon.` },
         { status: 400 }
       )
     }
-
-    const supabase = createAdminClient()
 
     // Fallback/demo items carry non-UUID placeholder ids — filter them out up front.
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -122,6 +135,9 @@ export async function POST(req: NextRequest) {
       }
       itemsTotal += Number(product.price) * item.quantity
     }
+    // Same shared catalog everywhere — city_price_multiplier is where
+    // "Umuahia costs a bit more than Makurdi" actually takes effect.
+    itemsTotal = Math.round(itemsTotal * city.priceMultiplier)
 
     // Market Day is a DELIVERY schedule the buyer opts into, not a
     // restriction on which day they're allowed to order — getMarketDayInfo()
@@ -132,10 +148,10 @@ export async function POST(req: NextRequest) {
     const isMarketDayOrder = marketDayOptIn === true
     const marketDay = getMarketDayInfo()
 
-    // Distance-based delivery: ₦200/km from Welfare Quarters HQ
+    // Distance-based delivery: ₦200/km from the resolved city's hub
     // 20% off delivery fee on Market Days; cashback (not a basket discount)
     // is credited separately once the order is paid — see credit_market_day_cashback().
-    const distanceKm = haversineKm(WEN_HQ.lat, WEN_HQ.lng, deliveryLat, deliveryLng)
+    const distanceKm = haversineKm(city.hqLat, city.hqLng, deliveryLat, deliveryLng)
     const delivery   = calcDeliveryFee(distanceKm, isMarketDayOrder)
 
     let userId: string | null = null

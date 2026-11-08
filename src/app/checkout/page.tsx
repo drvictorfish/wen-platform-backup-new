@@ -11,7 +11,8 @@ import {
 import { Logo } from '@/components/Logo'
 import { MarketDayBanner } from '@/components/MarketDayBanner'
 import { getMarketDayInfo, type MarketDayInfo } from '@/lib/market-day'
-import { haversineKm, calcDeliveryFee, isWithinServiceArea, SERVICE_AREA_LABEL, WEN_HQ, type DeliveryCalc } from '@/lib/delivery'
+import { haversineKm, calcDeliveryFee, type DeliveryCalc } from '@/lib/delivery'
+import { fetchCities, resolveCityByPoint, combinedServiceAreaBox, type CityInfo } from '@/lib/cities'
 import { AddressAutocomplete, type AddressSuggestion } from '@/components/AddressAutocomplete'
 import { validatePhone } from '@/lib/validate'
 
@@ -60,6 +61,8 @@ export default function CheckoutPage() {
   const [walletBalance, setWalletBalance]     = useState(0)
   const [useWallet, setUseWallet]             = useState(false)
   const [walletAmountInput, setWalletAmountInput] = useState('')
+  const [cities, setCities] = useState<CityInfo[]>([])
+  const [resolvedCity, setResolvedCity] = useState<CityInfo | null>(null)
 
   useEffect(() => {
     if (cartCount === 0) router.replace('/store')
@@ -67,6 +70,14 @@ export default function CheckoutPage() {
 
   useEffect(() => {
     setMarketDay(getMarketDayInfo())
+  }, [])
+
+  // Active cities (Makurdi, Umuahia, …) — each delivery address resolves to
+  // one of these, which gates availability and sets the price multiplier.
+  // The server independently re-resolves this from the real coordinates at
+  // order creation; this is only for the on-screen estimate.
+  useEffect(() => {
+    fetchCities().then(setCities)
   }, [])
 
   // Preview-only — the server independently recomputes and applies both of
@@ -84,20 +95,28 @@ export default function CheckoutPage() {
 
   // Recalculate delivery fee whenever the selected address, pin, or market-day state changes
   useEffect(() => {
-    if (!deliveryCoords) { setDeliveryCalc(null); return }
-    const distKm = haversineKm(WEN_HQ.lat, WEN_HQ.lng, deliveryCoords.lat, deliveryCoords.lng)
+    if (!deliveryCoords || !resolvedCity) { setDeliveryCalc(null); return }
+    const distKm = haversineKm(resolvedCity.hqLat, resolvedCity.hqLng, deliveryCoords.lat, deliveryCoords.lng)
     setDeliveryCalc(calcDeliveryFee(distKm, wantsMarketDay))
-  }, [deliveryCoords, wantsMarketDay])
+  }, [deliveryCoords, resolvedCity, wantsMarketDay])
 
   const hasPrices         = cartLines.some(l => l.price)
   const deliveryFee       = deliveryCalc?.finalFee ?? null
+  // Same shared catalog everywhere — the resolved city's price_multiplier is
+  // where "Umuahia costs a bit more than Makurdi" becomes visible on screen.
+  // Before an address resolves to a city, this shows the plain base total.
+  // The server independently re-resolves the city and re-applies this from
+  // raw DB data at order creation (api/orders/route.ts) — this is only a
+  // preview.
+  const cityMultiplier    = resolvedCity?.priceMultiplier ?? 1
+  const adjustedSubtotal  = cartTotal != null ? Math.round(cartTotal * cityMultiplier) : null
   // Preview of the 25%-of-delivery-fee stacking guardrail — the server is
   // the source of truth for the actual amount charged.
   const deliveryCreditApplied = deliveryFee != null
     ? Math.round(Math.max(0, Math.min(availableCredit, deliveryFee * 0.25, deliveryFee)) * 100) / 100
     : 0
   const remainingAfterCredit = hasPrices && deliveryFee != null
-    ? Math.max(0, (cartTotal ?? 0) + deliveryFee - deliveryCreditApplied)
+    ? Math.max(0, (adjustedSubtotal ?? 0) + deliveryFee - deliveryCreditApplied)
     : null
   // What the wallet toggle can actually cover — capped by balance and by
   // what's left after delivery credit. The server clamps independently;
@@ -112,7 +131,7 @@ export default function CheckoutPage() {
     ? Math.round(Math.max(0, Math.min(walletRequested, walletMaxApplicable)) * 100) / 100
     : 0
   const grandTotal        = hasPrices && deliveryFee != null
-    ? (cartTotal ?? 0) + deliveryFee - deliveryCreditApplied - walletAmountApplied
+    ? (adjustedSubtotal ?? 0) + deliveryFee - deliveryCreditApplied - walletAmountApplied
     : null
 
   // Order fields appear on the page top-to-bottom — used to scroll/focus
@@ -160,21 +179,30 @@ export default function CheckoutPage() {
     setForm(current => ({ ...current, address }))
     setDeliveryCoords(null)
     setLocationSource(null)
+    setResolvedCity(null)
     setErrors(current => ({ ...current, address: undefined }))
   }
 
-  function handleAddressSelect(suggestion: AddressSuggestion) {
-    if (!isWithinServiceArea(suggestion.lat, suggestion.lng)) {
+  async function handleAddressSelect(suggestion: AddressSuggestion) {
+    // cities may not have loaded yet on a very fast first interaction —
+    // fetchCities() is cached, so this is cheap and avoids a false "not
+    // available" before we actually know.
+    const activeCities = cities.length > 0 ? cities : await fetchCities()
+    const city = resolveCityByPoint(activeCities, suggestion.lat, suggestion.lng)
+    if (!city) {
+      const cityNames = activeCities.map(c => `${c.name}, ${c.state}`).join(' or ')
       setDeliveryCoords(null)
       setLocationSource(null)
+      setResolvedCity(null)
       setErrors(current => ({
         ...current,
-        address: `Delivery isn't available there yet — we currently deliver within ${SERVICE_AREA_LABEL}, and we'll be expanding soon.`,
+        address: `Delivery isn't available there yet — we currently deliver within ${cityNames || 'select cities'}, and we'll be expanding soon.`,
       }))
       return
     }
     setDeliveryCoords({ lat: suggestion.lat, lng: suggestion.lng })
     setLocationSource('address')
+    setResolvedCity(city)
     setErrors(current => ({ ...current, address: undefined }))
   }
 
@@ -252,19 +280,24 @@ export default function CheckoutPage() {
         }>
           <LocationMapPicker
             initialLocation={deliveryCoords ? { ...deliveryCoords, label: form.address } : undefined}
-            onConfirm={(coords, label) => {
+            onConfirm={async (coords, label) => {
               setShowMap(false)
-              if (!isWithinServiceArea(coords.lat, coords.lng)) {
+              const activeCities = cities.length > 0 ? cities : await fetchCities()
+              const city = resolveCityByPoint(activeCities, coords.lat, coords.lng)
+              if (!city) {
+                const cityNames = activeCities.map(c => `${c.name}, ${c.state}`).join(' or ')
                 setDeliveryCoords(null)
                 setLocationSource(null)
+                setResolvedCity(null)
                 setErrors(e => ({
                   ...e,
-                  address: `Delivery isn't available there yet — we currently deliver within ${SERVICE_AREA_LABEL}, and we'll be expanding soon.`,
+                  address: `Delivery isn't available there yet — we currently deliver within ${cityNames || 'select cities'}, and we'll be expanding soon.`,
                 }))
                 return
               }
               setDeliveryCoords(coords)
               setLocationSource('pin')
+              setResolvedCity(city)
               setForm(f => ({ ...f, address: f.address.trim() ? f.address : label }))
               setErrors(e => ({ ...e, address: undefined }))
             }}
@@ -368,7 +401,9 @@ export default function CheckoutPage() {
                           <p className="text-[12px] text-stone/50 mt-0.5">
                             {locationSource === 'address'
                               ? 'Estimated from the selected address'
-                              : 'From our Welfare Quarters dispatch point'}
+                              : resolvedCity
+                                ? `From our ${resolvedCity.name} dispatch point`
+                                : 'From our dispatch point'}
                           </p>
                         </div>
                         <div className="text-right">
@@ -474,6 +509,7 @@ export default function CheckoutPage() {
                       invalid={!!errors.address}
                       onChange={handleAddressChange}
                       onSelect={handleAddressSelect}
+                      biasBox={combinedServiceAreaBox(cities)}
                     />
                     {errors.address && <p className="text-[12px] text-red-500 mt-1">{errors.address}</p>}
 
@@ -613,8 +649,13 @@ export default function CheckoutPage() {
                   {hasPrices && (
                     <div className="flex justify-between text-[13px] text-stone/60">
                       <span>Subtotal</span>
-                      <span>{fmt(cartTotal)}</span>
+                      <span>{fmt(adjustedSubtotal)}</span>
                     </div>
+                  )}
+                  {hasPrices && resolvedCity && cityMultiplier !== 1 && (
+                    <p className="text-[11px] text-stone/40 -mt-1">
+                      {resolvedCity.name} pricing ({cityMultiplier > 1 ? '+' : ''}{Math.round((cityMultiplier - 1) * 100)}%)
+                    </p>
                   )}
                   <div className="flex justify-between text-[13px] text-stone/60">
                     <span className="flex items-center gap-1.5">
