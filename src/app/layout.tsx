@@ -71,15 +71,19 @@ export default function RootLayout({
       data-font={museo ? "museo" : undefined}
       className={`${nohemi.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
-      {museo && (
-        <head>
-          <link rel="preconnect" href="https://use.typekit.net" crossOrigin="anonymous" />
-          <link rel="preconnect" href="https://p.typekit.net" crossOrigin="anonymous" />
-          <link rel="stylesheet" href={`https://use.typekit.net/${TYPEKIT_KIT_ID}.css`} />
-        </head>
-      )}
-      <body className="min-h-full flex flex-col bg-grain text-soil">
-        <Script id="meta-pixel" strategy="afterInteractive">
+      <head>
+        {museo && (
+          <>
+            <link rel="preconnect" href="https://use.typekit.net" crossOrigin="anonymous" />
+            <link rel="preconnect" href="https://p.typekit.net" crossOrigin="anonymous" />
+            <link rel="stylesheet" href={`https://use.typekit.net/${TYPEKIT_KIT_ID}.css`} />
+          </>
+        )}
+        {/* beforeInteractive is required here (not afterInteractive) so this
+         * renders as a literal <script> tag in the server-rendered <head> —
+         * matching Meta's own install instructions exactly, which matters
+         * for their automated "is the pixel installed" checker. */}
+        <Script id="meta-pixel" strategy="beforeInteractive">
           {`!function(f,b,e,v,n,t,s)
           {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
           n.callMethod.apply(n,arguments):n.queue.push(arguments)};
@@ -91,6 +95,8 @@ export default function RootLayout({
           fbq('init', '${META_PIXEL_ID}');
           fbq('track', 'PageView');`}
         </Script>
+      </head>
+      <body className="min-h-full flex flex-col bg-grain text-soil">
         <noscript>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
