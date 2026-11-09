@@ -27,9 +27,12 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
-// Meta (Facebook/Instagram) ads pixel — Dr. Pick's ad account, for the
-// campaigns launching off wenfoods.com.
-const META_PIXEL_ID = "519848398532937"
+// Meta (Facebook/Instagram) ads pixels — Dr. Pick's ad account, for the
+// campaigns launching off wenfoods.com. Keeping both IDs registered (rather
+// than swapping) since it's unclear whether the second one replaces the
+// first or is a second pixel — fbq tracks PageView on every registered id,
+// so having both costs nothing and is easy to trim later.
+const META_PIXEL_IDS = ["519848398532937", "2405943683566758"]
 
 const SITE_URL = "https://wenfoods.com"
 const TITLE = "WEN — Fresh Farm Produce, Direct From Trusted Farmers"
@@ -92,20 +95,23 @@ export default function RootLayout({
           t.src=v;s=b.getElementsByTagName(e)[0];
           s.parentNode.insertBefore(t,s)}(window, document,'script',
           'https://connect.facebook.net/en_US/fbevents.js');
-          fbq('init', '${META_PIXEL_ID}');
+          ${META_PIXEL_IDS.map(id => `fbq('init', '${id}');`).join('\n          ')}
           fbq('track', 'PageView');`}
         </Script>
       </head>
       <body className="min-h-full flex flex-col bg-grain text-soil">
         <noscript>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            height="1"
-            width="1"
-            style={{ display: "none" }}
-            src={`https://www.facebook.com/tr?id=${META_PIXEL_ID}&ev=PageView&noscript=1`}
-            alt=""
-          />
+          {META_PIXEL_IDS.map(id => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={id}
+              height="1"
+              width="1"
+              style={{ display: "none" }}
+              src={`https://www.facebook.com/tr?id=${id}&ev=PageView&noscript=1`}
+              alt=""
+            />
+          ))}
         </noscript>
         <LocationProvider>
           <CartProvider>
