@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import { JetBrains_Mono } from "next/font/google";
-import Script from "next/script";
 import { Analytics } from "@vercel/analytics/next";
 import { CartProvider } from "@/context/CartContext";
 import { LocationProvider } from "@/context/LocationContext";
@@ -33,6 +32,28 @@ const jetbrainsMono = JetBrains_Mono({
 // first or is a second pixel — fbq tracks PageView on every registered id,
 // so having both costs nothing and is easy to trim later.
 const META_PIXEL_IDS = ["519848398532937", "2405943683566758"]
+
+// Deliberately a raw <script> below, NOT next/script. In this Next.js
+// version, even strategy="beforeInteractive" doesn't emit the script as
+// literal text in the server-rendered HTML — it's serialized into a
+// self.__next_s queue and only turned into a real <script> element via
+// document.head.appendChild() once client JS runs (see
+// node_modules/next/dist/esm/client/app-bootstrap.js). That's invisible to
+// anything that fetches the page without executing JS — which is exactly
+// how Meta's pixel-installation checker was failing to find it. A raw
+// <script dangerouslySetInnerHTML> renders as literal, parseable script
+// text straight from the server, matching Meta's own "paste this between
+// <head> and </head>" instructions exactly.
+const META_PIXEL_SCRIPT = `!function(f,b,e,v,n,t,s)
+{if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];
+s.parentNode.insertBefore(t,s)}(window, document,'script',
+'https://connect.facebook.net/en_US/fbevents.js');
+${META_PIXEL_IDS.map(id => `fbq('init', '${id}');`).join('\n')}
+fbq('track', 'PageView');`
 
 const SITE_URL = "https://wenfoods.com"
 const TITLE = "WEN — Fresh Farm Produce, Direct From Trusted Farmers"
@@ -82,22 +103,7 @@ export default function RootLayout({
             <link rel="stylesheet" href={`https://use.typekit.net/${TYPEKIT_KIT_ID}.css`} />
           </>
         )}
-        {/* beforeInteractive is required here (not afterInteractive) so this
-         * renders as a literal <script> tag in the server-rendered <head> —
-         * matching Meta's own install instructions exactly, which matters
-         * for their automated "is the pixel installed" checker. */}
-        <Script id="meta-pixel" strategy="beforeInteractive">
-          {`!function(f,b,e,v,n,t,s)
-          {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
-          n.callMethod.apply(n,arguments):n.queue.push(arguments)};
-          if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
-          n.queue=[];t=b.createElement(e);t.async=!0;
-          t.src=v;s=b.getElementsByTagName(e)[0];
-          s.parentNode.insertBefore(t,s)}(window, document,'script',
-          'https://connect.facebook.net/en_US/fbevents.js');
-          ${META_PIXEL_IDS.map(id => `fbq('init', '${id}');`).join('\n          ')}
-          fbq('track', 'PageView');`}
-        </Script>
+        <script id="meta-pixel" dangerouslySetInnerHTML={{ __html: META_PIXEL_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col bg-grain text-soil">
         <noscript>
